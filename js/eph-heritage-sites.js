@@ -54,8 +54,17 @@ function loadPrimaryData() {
           PetaProvinsi[record.tempatLahirQid] = result.provinsiLabel.value;
         }
       });
+// 6. KUNCI PROVINSI: Kita baca lagi dari JSON! (Jika ada)
+        if (result.provinsiLabel && record.tempatLahirQid) {
+          PetaProvinsi[record.tempatLahirQid] = result.provinsiLabel.value;
+        }
+      }); // <-- Ini penutup forEach
 
-      // 7. Langsung bangun peta tanpa menunggu internet!
+      // 7. JEDA DULU! Karena JSON tidak punya provinsi, kita cicil dari Wikidata
+      return populateProvinceMapping();
+    })
+    .then(() => {
+      // 8. Setelah provinsi selesai ditarik, baru bangun peta dan UI!
       BootstrapDataIsLoaded = true;
       buildDynamicIndices();
       populateMapAndIndex();
@@ -63,8 +72,62 @@ function loadPrimaryData() {
       enableApp();
     })
     .catch(error => {
-      console.error("Gagal membaca JSON lokal:", error);
+      console.error("Gagal membaca JSON lokal atau menarik provinsi:", error);
     });
+}
+
+function populateProvinceMapping() {
+  let tempatLahirSet = new Set();
+  
+  Object.values(Records).forEach(r => {
+    // Hanya kumpulkan kota yang provinsinya belum diketahui
+    if (r.tempatLahirQid && !PetaProvinsi[r.tempatLahirQid]) {
+        tempatLahirSet.add(r.tempatLahirQid);
+    }
+  });
+
+  if (tempatLahirSet.size === 0) return Promise.resolve();
+
+  // Pecah daftar kota menjadi paket per 300 kota agar ringan
+  let qids = Array.from(tempatLahirSet);
+  let chunks = [];
+  for (let i = 0; i < qids.length; i += 300) {
+      chunks.push(qids.slice(i, i + 300));
+  }
+
+  let chain = Promise.resolve();
+  chunks.forEach((chunk) => {
+      chain = chain.then(() => {
+          let valuesClause = 'VALUES ?tempatLahir { ' + chunk.map(qid => `wd:${qid}`).join(' ') + ' }';
+          let query = `SELECT DISTINCT ?tempatLahirQid ?provinsiLabel WHERE {
+            VALUES ?provinsi { wd:Q1823 wd:Q3125978 wd:Q3540 wd:Q1890 wd:Q3741 wd:Q3630 wd:Q5067 wd:Q2051 wd:Q3724 wd:Q3557 wd:Q3586 wd:Q3916 wd:Q3906 wd:Q3891 wd:Q3899 wd:Q3903 wd:Q1866 wd:Q2223 wd:Q2110 wd:Q5093 wd:Q5094 wd:Q5062 wd:Q5061 wd:Q5095 wd:Q5096 wd:Q115253263 wd:Q112810104 wd:Q61439296 wd:Q12486766 wd:Q2175 wd:Q5082 wd:Q5078 wd:Q5065 wd:Q5075 wd:Q5068 wd:Q2772 wd:Q2271 wd:Q2140 }
+            ${valuesClause}
+            ?tempatLahir wdt:P131* ?provinsi .
+            ?provinsi rdfs:label ?provLabel .
+            FILTER(LANG(?provLabel) = "id")
+            BIND (SUBSTR(STR(?tempatLahir), 32) AS ?tempatLahirQid) .
+            BIND (STR(?provLabel) AS ?provinsiLabel) .
+          }`;
+
+          return fetch('https://query.wikidata.org/sparql?origin=*', {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Accept': 'application/sparql-results+json'
+              },
+              body: 'query=' + encodeURIComponent(query)
+          })
+          .then(res => res.json())
+          .then(data => {
+              data.results.bindings.forEach(result => {
+                  PetaProvinsi[result.tempatLahirQid.value] = result.provinsiLabel.value;
+              });
+          })
+          .catch(err => console.log("Gagal menyicil provinsi", err));
+      });
+  });
+
+  return chain;
 }
 
 function buildDynamicIndices() {
