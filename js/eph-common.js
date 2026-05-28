@@ -187,70 +187,62 @@ function displayRecordDetails(qid) {
 // the figure element will indicate "Belum ada foto".
 function generateFigure(filename, classNames = []) {
   if (filename) {
-    // 1. Buat ID unik untuk setiap figure
     let uniqueId = 'caption-' + Math.random().toString(36).substr(2, 9);
-
-    // Fetch the image attribution asynchronously then add it to the figure element
-    loadJsonp(
-      COMMONS_API_URL,
-      {
-        action : 'query',
-        format : 'json',
-        prop   : 'imageinfo',
-        iiprop : 'extmetadata',
-        titles : 'File:' + filename,
-      },
-      function(data) {
-        let metadata = Object.values(data.query.pages)[0].imageinfo[0].extmetadata;
-        
-        // Cek apakah metadata.Artist ada sebelum mengakses value-nya
-        let artistHtml = '';
-        if (metadata.Artist) {
-            artistHtml = metadata.Artist.value.trim();
-            artistHtml = artistHtml.replace(/<(?!\/?a ?)[^>]+>/g, '');
-if (artistHtml.includes('Unknown author')) {
-                artistHtml = 'Tidak diketahui';
-            }
-            if (artistHtml.search('href="//') >= 0) {
-              artistHtml = artistHtml.replace(/href="(?:https?:)?\/\//g, 'href="https://');
-            }
-        }
-
-        let licenseHtml = '';
-        if (metadata.AttributionRequired && metadata.AttributionRequired.value === 'true') {
-          licenseHtml = metadata.LicenseShortName.value.replace(/ /g, '&nbsp;');
-          licenseHtml = licenseHtml.replace(/-/g, '&#8209;');
-          licenseHtml = `[${licenseHtml}]`;
-          if (metadata.LicenseUrl) {
-            licenseHtml = `<a href="${metadata.LicenseUrl.value}">${licenseHtml}</a>`;
-          }
-          licenseHtml = ' ' + licenseHtml;
-        }
-
-        // 2. Tembak langsung ke ID uniknya
-        let targetCaption = document.getElementById(uniqueId);
-        if (targetCaption) {
-            targetCaption.innerHTML = artistHtml + licenseHtml;
-        }
-      }
-    );
-
     let encodedFilename = encodeURIComponent(filename);
+
+    // Fetch API modern untuk menarik pembuat foto & lisensi dari Wikimedia Commons
+    let apiUrl = `https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=extmetadata&titles=File:${encodedFilename}&origin=*`;
+
+    fetch(apiUrl)
+      .then(res => res.json())
+      .then(data => {
+        let pages = data.query.pages;
+        let pageId = Object.keys(pages)[0];
+        
+        if (pageId !== "-1" && pages[pageId].imageinfo) {
+          let metadata = pages[pageId].imageinfo[0].extmetadata;
+          let artistHtml = '';
+          
+          if (metadata.Artist) {
+              artistHtml = metadata.Artist.value.trim();
+              artistHtml = artistHtml.replace(/<(?!\/?a ?)[^>]+>/g, '');
+              if (artistHtml.includes('Unknown author')) artistHtml = 'Tidak diketahui';
+              artistHtml = artistHtml.replace(/href="(?:https?:)?\/\//g, 'href="https://');
+          }
+
+          let licenseHtml = '';
+          if (metadata.AttributionRequired && metadata.AttributionRequired.value === 'true' && metadata.LicenseShortName) {
+            licenseHtml = metadata.LicenseShortName.value.replace(/ /g, '&nbsp;').replace(/-/g, '&#8209;');
+            licenseHtml = `[${licenseHtml}]`;
+            if (metadata.LicenseUrl) licenseHtml = `<a href="${metadata.LicenseUrl.value}" target="_blank">${licenseHtml}</a>`;
+            licenseHtml = ' ' + licenseHtml;
+          }
+
+          let targetCaption = document.getElementById(uniqueId);
+          if (targetCaption) targetCaption.innerHTML = artistHtml + licenseHtml;
+        } else {
+          let targetCaption = document.getElementById(uniqueId);
+          if (targetCaption) targetCaption.innerHTML = 'Keterangan tidak tersedia';
+        }
+      })
+      .catch(err => {
+        console.error("Gagal memuat caption Commons:", err);
+        let targetCaption = document.getElementById(uniqueId);
+        if (targetCaption) targetCaption.innerHTML = '';
+      });
+
     return (
       `<figure class="${classNames.join(' ')}">` +
-        `<a href="${COMMONS_WIKI_URL_PREF}File:${encodedFilename}">` +
-          `<img class="loading" src="${COMMONS_WIKI_URL_PREF}Special:FilePath/${encodedFilename}?width=300" alt="" onload="this.className=''">` +
+        `<a href="https://commons.wikimedia.org/wiki/File:${encodedFilename}" target="_blank">` +
+          `<img class="loading" src="https://commons.wikimedia.org/wiki/Special:FilePath/${encodedFilename}?width=300" alt="" onload="this.className=''">` +
         '</a>' +
-        // 3. Pasang ID unik di elemen figcaption
-        `<figcaption id="${uniqueId}">(Loading…)</figcaption>` +
+        `<figcaption id="${uniqueId}">(Memuat keterangan foto...)</figcaption>` +
       '</figure>'
     );
-  }
-  else {
+  } else {
     return `<figure class="${classNames.join(' ')} nodata">Belum ada foto</figure>`;
   }
 }
-
 
 // Given a WDQS query result image data, returns the base image filename.
 function extractImageFilename(image) {
