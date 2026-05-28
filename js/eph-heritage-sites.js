@@ -472,16 +472,17 @@ function displayArticleExtract(title, elem) {
       let pageId = Object.keys(pages)[0]; 
       let extract = pages[pageId].extract;
 
-      if (extract) {
-          // 3. Menyaring paragraf agar yang tampil bukan baris kosong
+ if (extract) {
+          // Menyaring paragraf agar yang tampil bukan baris kosong
           let paragraphs = extract.match(/<p[^>]*>[\s\S]*?<\/p>/g);
           let validText = paragraphs ? paragraphs.find(text => text.length > 50) : extract;
-          if (!validText) validText = extract; // fallback jika hanya ada paragraf pendek
+          if (!validText) validText = extract;
 
           elem.innerHTML = validText +
-            '<p class="wikipedia-link" style="margin-top: 15px;">' +
-              `<a href="https://id.wikipedia.org/wiki/${encodeURIComponent(title)}" target="_blank" style="text-decoration: none; font-weight: bold;">` +
-                '<span>📖 Baca selengkapnya di Wikipedia</span>' +
+            '<p class="wikipedia-link">' +
+              `<a href="https://id.wikipedia.org/wiki/${encodeURIComponent(title)}" target="_blank">` +
+                '<img src="img/wikipedia_tiny_logo.png" alt="" />' +
+                '<span>Baca selengkapnya di Wikipedia</span>' +
               '</a>' +
             '</p>';
       } else {
