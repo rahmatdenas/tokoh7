@@ -1,46 +1,63 @@
 'use strict';
 
-// Fungsi persiapan awal (JANGAN DIHAPUS)
+let currentFilterMode = 'union';
+let currentRegionFilter = 'all';
+let activePekerjaan = new Set();
+let PekerjaanButtons = {};
+
+// 1. Fungsi Persiapan
 function doPreProcessing() {
   let anchorElem = document.getElementById('wdqs-link');
   if (anchorElem) anchorElem.href = 'https://query.wikidata.org/#' + encodeURIComponent(ABOUT_SPARQL_QUERY);
   processHashChange();
 }
 
-// Fungsi pembaca "Super JSON" (PENGGANTI SEMUA FUNGSI POPULATE)
+// 2. Fungsi Pemuat Utama (Anti-Macet)
 function loadPrimaryData() {
   doPreProcessing();
 
   fetch('data-tokoh.json')
-    .then(response => response.json())
+    .then(response => {
+        if (!response.ok) throw new Error("File 'data-tokoh.json' tidak ditemukan di folder Anda.");
+        return response.json();
+    })
     .then(data => {
+      if (!data || !data.results || !data.results.bindings) {
+          throw new Error("Format JSON salah!");
+      }
+
       data.results.bindings.forEach(result => {
+        if (!result.site || !result.site.value) return;
+
         let qid = result.site.value.split('/').pop();
         if (!(qid in Records)) Records[qid] = new Record();
         let record = Records[qid];
 
-        // 1. Nama & Tempat Lahir
+        // Nama & Tempat Lahir
         record.title = result.siteLabel ? result.siteLabel.value : `Tokoh (${qid})`;
         record.indexTitle = record.title;
         if (result.tempatLahirUrl) record.tempatLahirQid = result.tempatLahirUrl.value.split('/').pop();
 
-        // 2. Koordinat
+        // Koordinat
         if (result.coord) {
           let wktBits = result.coord.value.split(/\(|\)| /);
-          record.lat = parseFloat(wktBits[2]);
-          record.lon = parseFloat(wktBits[1]);
+          if (wktBits.length >= 3) {
+              record.lat = parseFloat(wktBits[2]);
+              record.lon = parseFloat(wktBits[1]);
+          }
         }
 
-        // 3. Foto & Wikipedia
+        // Foto & Wikipedia
         if (result.image && !record.imageFilename) record.imageFilename = extractImageFilename(result.image);
+        if (result.wikiTitle) record.articleTitle = decodeURIComponent(result.wikiTitle.value);
 
-        // 4. Demografi (Gender)
+        // Demografi (Gender)
         if (result.genderUrl) {
            let genderQid = result.genderUrl.value.split('/').pop();
            if (KAMUS_GENDER[genderQid]) record.jenisKelamin = KAMUS_GENDER[genderQid];
         }
 
-        // 5. Pekerjaan Ganda
+        // Pekerjaan Ganda
         if (result.pekerjaanList) {
            let jobs = result.pekerjaanList.value.split(',');
            jobs.forEach(jobUrl => {
@@ -49,22 +66,17 @@ function loadPrimaryData() {
            });
         }
 
-        // 6. KUNCI PROVINSI: Kita baca lagi dari JSON!
+        // Membaca Provinsi dari JSON (Jika ada)
         if (result.provinsiLabel && record.tempatLahirQid) {
           PetaProvinsi[record.tempatLahirQid] = result.provinsiLabel.value;
         }
       });
-// 6. KUNCI PROVINSI: Kita baca lagi dari JSON! (Jika ada)
-        if (result.provinsiLabel && record.tempatLahirQid) {
-          PetaProvinsi[record.tempatLahirQid] = result.provinsiLabel.value;
-        }
-      }); // <-- Ini penutup forEach
 
-      // 7. JEDA DULU! Karena JSON tidak punya provinsi, kita cicil dari Wikidata
+      // Panggil sistem penyicil provinsi
       return populateProvinceMapping();
     })
     .then(() => {
-      // 8. Setelah provinsi selesai ditarik, baru bangun peta dan UI!
+      // Setelah provinsi selesai dicicil, bangun peta
       BootstrapDataIsLoaded = true;
       buildDynamicIndices();
       populateMapAndIndex();
@@ -72,15 +84,23 @@ function loadPrimaryData() {
       enableApp();
     })
     .catch(error => {
-      console.error("Gagal membaca JSON lokal atau menarik provinsi:", error);
+      console.error("FATAL ERROR:", error);
+      alert("Sistem Darurat: Menampilkan peta tanpa filter provinsi karena koneksi lambat/error (" + error.message + ").");
+      
+      // SISTEM DARURAT: Tetap panggil fungsi perenderan agar tidak macet di loading
+      BootstrapDataIsLoaded = true;
+      buildDynamicIndices();
+      populateMapAndIndex();
+      updateFeatureCounts();
+      enableApp();
     });
 }
 
+// 3. Fungsi Penyicil Provinsi (Metode GET agar tidak diblokir browser)
 function populateProvinceMapping() {
   let tempatLahirSet = new Set();
-  
+
   Object.values(Records).forEach(r => {
-    // Hanya kumpulkan kota yang provinsinya belum diketahui
     if (r.tempatLahirQid && !PetaProvinsi[r.tempatLahirQid]) {
         tempatLahirSet.add(r.tempatLahirQid);
     }
@@ -88,11 +108,11 @@ function populateProvinceMapping() {
 
   if (tempatLahirSet.size === 0) return Promise.resolve();
 
-  // Pecah daftar kota menjadi paket per 300 kota agar ringan
   let qids = Array.from(tempatLahirSet);
   let chunks = [];
-  for (let i = 0; i < qids.length; i += 300) {
-      chunks.push(qids.slice(i, i + 300));
+  // Paket diturunkan menjadi 100 agar URL tidak kepanjangan
+  for (let i = 0; i < qids.length; i += 100) {
+      chunks.push(qids.slice(i, i + 100));
   }
 
   let chain = Promise.resolve();
@@ -109,41 +129,37 @@ function populateProvinceMapping() {
             BIND (STR(?provLabel) AS ?provinsiLabel) .
           }`;
 
-          return fetch('https://query.wikidata.org/sparql?origin=*', {
-              method: 'POST',
-              headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'Accept': 'application/sparql-results+json'
-              },
-              body: 'query=' + encodeURIComponent(query)
-          })
+          let url = 'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(query) + '&origin=*';
+          return fetch(url)
           .then(res => res.json())
           .then(data => {
-              data.results.bindings.forEach(result => {
-                  PetaProvinsi[result.tempatLahirQid.value] = result.provinsiLabel.value;
-              });
+              if(data && data.results && data.results.bindings) {
+                  data.results.bindings.forEach(result => {
+                      PetaProvinsi[result.tempatLahirQid.value] = result.provinsiLabel.value;
+                  });
+              }
           })
-          .catch(err => console.log("Gagal menyicil provinsi", err));
+          .catch(err => console.log("Gagal menyicil provinsi:", err));
       });
   });
 
   return chain;
 }
 
+// 4. Pembangun Indeks
 function buildDynamicIndices() {
   BirthplaceIndex = { all: new IndexEntry() };
   PekerjaanIndex = { all: new IndexEntry() };
-  
+
   Object.values(Records).forEach(record => {
     BirthplaceIndex.all.total++;
-    PekerjaanIndex.all.total++; 
-    
-    // MENENTUKAN KERANJANG PROVINSI ATAU LUAR NEGERI
-    let regionLabel = "Luar Negeri"; 
+    PekerjaanIndex.all.total++;
+
+    let regionLabel = "Luar Negeri";
     if (record.tempatLahirQid && PetaProvinsi[record.tempatLahirQid]) {
       regionLabel = PetaProvinsi[record.tempatLahirQid];
     }
-    
+
     record.provinsiLabel = regionLabel;
     record.areaTags.add(regionLabel);
 
@@ -163,13 +179,14 @@ function buildDynamicIndices() {
   });
 }
 
+// 5. Perenderan Peta & Marker
 function populateMapAndIndex() {
   let listIndex = document.getElementById('index-list');
   let mapMarkers = [];
-  
+
   Object.entries(Records).forEach(entry => {
     let qid = entry[0], record = entry[1];
-    
+
     if (record.lat && record.lon) {
       let mapMarker = L.marker(
         [record.lat, record.lon],
@@ -177,61 +194,55 @@ function populateMapAndIndex() {
       );
       record.mapMarker = mapMarker;
       mapMarker.bindPopup(record.title, { closeButton: false });
-      
+
       let popup = mapMarker.getPopup();
       popup._qid = qid;
       record.popup = popup;
-      
+
       mapMarkers.push(mapMarker);
     }
-    
+
     let li = document.createElement('li');
     li.innerHTML = `<a href="#${qid}" id="idx-${qid}">${record.indexTitle}</a>`;
     record.indexLi = li;
     if(listIndex) listIndex.appendChild(li);
   });
-  
+
   Cluster.addLayers(mapMarkers);
-  generateFilterSelect(); 
+  generateFilterSelect();
   processHashChange();
 }
-let currentFilterMode = 'union';
-let currentRegionFilter = 'all';
-let activePekerjaan = new Set(); 
-let PekerjaanButtons = {};
 
+// 6. Pembuat Filter Dinamis UI
 function generateFilterSelect() {
   let selectRegion = document.getElementById('filter-region');
   let containerPekerjaan = document.getElementById('filter-pekerjaan-buttons');
   let btnAllPekerjaan = document.getElementById('btn-all-pekerjaan');
-  
+
   if(selectRegion) {
-    // 1. Hitung jumlah tokoh khusus Indonesia (Total semua dikurangi Luar Negeri)
     let totalLuarNegeri = BirthplaceIndex['Luar Negeri'] ? BirthplaceIndex['Luar Negeri'].total : 0;
     let totalIndonesia = BirthplaceIndex.all.total - totalLuarNegeri;
 
-    // 2. Ganti teks awal dan tambahkan opsi "Seluruh Indonesia"
-selectRegion.innerHTML = `
+    selectRegion.innerHTML = `
       <option value="all">Semua Tempat Lahir – ${BirthplaceIndex.all.total} Tokoh</option>
       <option value="indonesia_only">Seluruh Indonesia – ${totalIndonesia} Tokoh</option>
     `;
-    
+
     let sortedRegions = Object.keys(BirthplaceIndex)
       .filter(lbl => lbl !== 'all' && lbl !== 'Luar Negeri' && lbl !== 'Indonesia (Umum)')
       .sort((a, b) => a.localeCompare(b));
-      
+
     if (BirthplaceIndex['Indonesia (Umum)']) {
       sortedRegions.push('Indonesia (Umum)');
     }
-
     if (BirthplaceIndex['Luar Negeri']) {
       sortedRegions.push('Luar Negeri');
     }
 
     sortedRegions.forEach(lbl => {
       let option = document.createElement('option');
-      option.value = lbl; 
-option.textContent = `${lbl} – ${BirthplaceIndex[lbl].total} Tokoh`;
+      option.value = lbl;
+      option.textContent = `${lbl} – ${BirthplaceIndex[lbl].total} Tokoh`;
       selectRegion.appendChild(option);
     });
 
@@ -249,14 +260,14 @@ option.textContent = `${lbl} – ${BirthplaceIndex[lbl].total} Tokoh`;
       .sort((a, b) => PekerjaanIndex[a].label.localeCompare(PekerjaanIndex[b].label));
 
     let featButtons = [];
-    PekerjaanButtons = {}; 
+    PekerjaanButtons = {};
 
     sortedPekerjaan.forEach(pkj => {
       let btn = document.createElement('button');
       btn.className = 'feat-btn';
       btn.setAttribute('data-filter', pkj);
       btn.textContent = `${PekerjaanIndex[pkj].label} (${PekerjaanIndex[pkj].total})`;
-      
+
       PekerjaanButtons[pkj] = btn;
 
       btn.addEventListener('click', function() {
@@ -292,16 +303,18 @@ option.textContent = `${lbl} – ${BirthplaceIndex[lbl].total} Tokoh`;
       applyIntersectionFilter();
     });
   }
-let modeSelect = document.getElementById('filter-mode-select');
+
+  let modeSelect = document.getElementById('filter-mode-select');
   if (modeSelect) {
     modeSelect.addEventListener('change', function() {
-      currentFilterMode = this.value; // set nilai union atau intersection
+      currentFilterMode = this.value;
       applyIntersectionFilter();
       this.blur();
     });
   }
 }
 
+// 7. Kalkulator Tombol Angka (Dinamis)
 function updateFeatureCounts() {
   let totalUnion = 0;
   let totalIntersection = 0;
@@ -312,16 +325,15 @@ function updateFeatureCounts() {
   });
 
   Object.values(Records).forEach(record => {
-    // LOGIKA FILTER WILAYAH
     let matchRegion = false;
     if (currentRegionFilter === 'all') {
         matchRegion = true;
     } else if (currentRegionFilter === 'indonesia_only') {
-        matchRegion = !record.areaTags.has('Luar Negeri'); 
+        matchRegion = !record.areaTags.has('Luar Negeri');
     } else {
         matchRegion = record.areaTags.has(currentRegionFilter);
     }
-    
+
     if (matchRegion) {
       record.pekerjaan.forEach(pkj => {
         if (tempJobCounts[pkj] !== undefined) {
@@ -331,7 +343,7 @@ function updateFeatureCounts() {
 
       let hasAny = true;
       let hasAll = true;
-      
+
       if (activePekerjaan.size > 0) {
         hasAny = Array.from(activePekerjaan).some(pkj => record.pekerjaan.has(pkj));
         hasAll = Array.from(activePekerjaan).every(pkj => record.pekerjaan.has(pkj));
@@ -342,39 +354,27 @@ function updateFeatureCounts() {
     }
   });
 
-  // 1. Perbarui angka teks di masing-masing tombol profesi
   Object.keys(tempJobCounts).forEach(pkj => {
     if (PekerjaanButtons[pkj]) {
       PekerjaanButtons[pkj].textContent = `${PekerjaanIndex[pkj].label} (${tempJobCounts[pkj]})`;
     }
   });
 
-  // =========================================================
-  // 2. LOGIKA BARU: MENGURUTKAN TOMBOL SECARA DINAMIS
-  // =========================================================
-  
-  // Ambil daftar profesi, lalu urutkan seperti membuat ranking kelas
   let sortedJobs = Object.keys(tempJobCounts).sort((a, b) => {
-     // A. Urutkan dari angka terbesar ke terkecil
      if (tempJobCounts[b] !== tempJobCounts[a]) {
          return tempJobCounts[b] - tempJobCounts[a];
      }
-     // B. Jika angkanya kebetulan sama besar, urutkan sesuai abjad nama profesinya
      return PekerjaanIndex[a].label.localeCompare(PekerjaanIndex[b].label);
   });
 
-  // Terapkan nomor antrean (order) ke setiap tombol
   sortedJobs.forEach((pkj, index) => {
      if (PekerjaanButtons[pkj]) {
-        // Antrean dimulai dari 1 (karena posisi 0 kita simpan untuk Semua Pekerjaan)
-        PekerjaanButtons[pkj].style.order = index + 1; 
+        PekerjaanButtons[pkj].style.order = index + 1;
      }
   });
 
-  // Kunci tombol "Semua Pekerjaan" di posisi mutlak paling pertama (nilai order = 0)
   let btnAllPekerjaan = document.getElementById('btn-all-pekerjaan');
-  if (btnAllPekerjaan) btnAllPekerjaan.style.order = 0; 
-  // =========================================================
+  if (btnAllPekerjaan) btnAllPekerjaan.style.order = 0;
 
   let modeSelect = document.getElementById('filter-mode-select');
   if (modeSelect) {
@@ -383,27 +383,27 @@ function updateFeatureCounts() {
   }
 }
 
+// 8. Mesin Eksekutor Gabungan/Irisan
 function applyIntersectionFilter() {
   Cluster.clearLayers();
-  
+
   let ol = document.getElementById('index-list');
-  if(ol) ol.innerHTML = ''; 
-  
+  if(ol) ol.innerHTML = '';
+
   let validMarkers = [];
-  
+
   let validRecords = Object.values(Records).filter(record => {
-    // LOGIKA FILTER WILAYAH BARU
     let matchRegion = false;
     if (currentRegionFilter === 'all') {
         matchRegion = true;
     } else if (currentRegionFilter === 'indonesia_only') {
-        matchRegion = !record.areaTags.has('Luar Negeri'); // Selama bukan Luar Negeri, berarti Indonesia
+        matchRegion = !record.areaTags.has('Luar Negeri');
     } else {
         matchRegion = record.areaTags.has(currentRegionFilter);
     }
 
     let matchPekerjaan = true;
-    
+
     if (activePekerjaan.size > 0) {
       if (currentFilterMode === 'union') {
         matchPekerjaan = Array.from(activePekerjaan).some(pkj => record.pekerjaan.has(pkj));
@@ -411,7 +411,7 @@ function applyIntersectionFilter() {
         matchPekerjaan = Array.from(activePekerjaan).every(pkj => record.pekerjaan.has(pkj));
       }
     }
-    
+
     return matchRegion && matchPekerjaan;
   }).sort((a, b) => {
     return a.indexTitle.localeCompare(b.indexTitle);
@@ -431,6 +431,7 @@ function applyIntersectionFilter() {
   }
 }
 
+// 9. Fungsi Pemantik Klik Tokoh
 function activateSite(qid) {
   displayRecordDetails(qid);
   let record = Records[qid];
@@ -446,20 +447,20 @@ function activateSite(qid) {
   }
 }
 
+// 10. Live Fetch Profil & Wikipedia dari Wikidata
 function generateRecordDetails(qid) {
   let record = Records[qid];
-  
+
   let titleHtml = `<h1 id="title-header-${qid}">Memuat nama...</h1>`;
   let figureHtml = generateFigure(record.imageFilename);
 
-  // KITA UBAH: Selalu paksa tampilkan animasi loading karena kita akan mencarinya secara live
   let articleHtml = '<div class="article main-text loading"><div class="loader"></div></div>';
 
   let infoHtml = '<h2>Informasi Profil</h2><ul class="designations">';
   infoHtml += `<li><p><strong>Tempat Lahir:</strong> <span id="lokasi-${qid}">Memuat lokasi...</span> (${record.provinsiLabel})</p></li>`;
-  
+
   if (record.jenisKelamin) infoHtml += `<li><p><strong>Jenis Kelamin:</strong> ${record.jenisKelamin}</p></li>`;
-  
+
   if (record.pekerjaan.size > 0) {
     let pkjList = Array.from(record.pekerjaan).join(', ');
     infoHtml += `<li><p><strong>Pekerjaan:</strong> ${pkjList}</p></li>`;
@@ -470,33 +471,30 @@ function generateRecordDetails(qid) {
   panelElem.innerHTML =
     `<a class="main-wikidata-link" href="https://www.wikidata.org/wiki/${qid}" target="_blank" title="Lihat di Wikidata">` +
     '<img src="img/wikidata_tiny_logo.png" alt="[Lihat item Wikidata]" /></a>' +
-    titleHtml + figureHtml + articleHtml + infoHtml;  
-  
+    titleHtml + figureHtml + articleHtml + infoHtml;
+
   record.panelElem = panelElem;
 
   let queryIds = qid;
   if (record.tempatLahirQid) queryIds += `|${record.tempatLahirQid}`;
 
-  // KUNCI UTAMA: Kita tambahkan "sitelinks" ke dalam request Wikidata!
   fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${queryIds}&props=labels|sitelinks&languages=id|en&format=json&origin=*`)
     .then(res => res.json())
     .then(data => {
         let entPerson = data.entities[qid];
         if (entPerson) {
-          // 1. Tarik Nama Asli
           let realName = entPerson.labels.id ? entPerson.labels.id.value : (entPerson.labels.en ? entPerson.labels.en.value : qid);
-          
+
           let headerEl = document.getElementById(`title-header-${qid}`);
           if(headerEl) headerEl.textContent = realName;
-          
+
           let idxEl = document.getElementById(`idx-${qid}`);
           if(idxEl) idxEl.textContent = realName;
-          
+
           if(record.mapMarker) record.mapMarker.setPopupContent(realName);
           record.title = realName;
           record.indexTitle = realName;
 
-          // 2. PEMICU WIKIPEDIA OTOMATIS: Tarik artikel langsung lewat Sitelink Wikidata
           let articleContainer = panelElem.querySelector('.article');
           if (entPerson.sitelinks && entPerson.sitelinks.idwiki) {
               let wikiTitle = entPerson.sitelinks.idwiki.title;
@@ -507,7 +505,6 @@ function generateRecordDetails(qid) {
           }
         }
 
-        // 3. Tarik Nama Kota Kelahiran
         if (record.tempatLahirQid) {
           let entCity = data.entities[record.tempatLahirQid];
           if (entCity) {
@@ -520,20 +517,18 @@ function generateRecordDetails(qid) {
     .catch(err => console.log("Gagal memuat API dari Wikidata", err));
 }
 
+// 11. Penarik Artikel Wikipedia
 function displayArticleExtract(title, elem) {
-  // 1. Menggunakan Fetch modern dengan "origin=*" agar tidak diblokir keamanan (CORS)
   let apiUrl = `https://id.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&redirects=true&titles=${encodeURIComponent(title)}&origin=*`;
 
   fetch(apiUrl)
     .then(response => response.json())
     .then(data => {
       let pages = data.query.pages;
-      // 2. ID Halaman Wikipedia sifatnya dinamis, jadi kita ambil urutan array pertama
-      let pageId = Object.keys(pages)[0]; 
+      let pageId = Object.keys(pages)[0];
       let extract = pages[pageId].extract;
 
- if (extract) {
-          // Menyaring paragraf agar yang tampil bukan baris kosong
+      if (extract) {
           let paragraphs = extract.match(/<p[^>]*>[\s\S]*?<\/p>/g);
           let validText = paragraphs ? paragraphs.find(text => text.length > 50) : extract;
           if (!validText) validText = extract;
@@ -548,8 +543,7 @@ function displayArticleExtract(title, elem) {
       } else {
           elem.innerHTML = '<p><em>Cuplikan artikel belum tersedia di Wikipedia.</em></p>';
       }
-      
-      // Matikan animasi loading
+
       elem.classList.remove('loading');
     })
     .catch(error => {
@@ -559,6 +553,7 @@ function displayArticleExtract(title, elem) {
     });
 }
 
+// 12. Kelas Struktur Data
 class IndexEntry {
   constructor() {
     this.label = '';
@@ -571,12 +566,12 @@ class Record {
     this.title = undefined;
     this.imageFilename = '';
     this.articleTitle = undefined;
-    
+
     this.tempatLahirQid = undefined;
     this.provinsiLabel = undefined;
     this.jenisKelamin = undefined;
-    this.pekerjaan = new Set(); 
-    
+    this.pekerjaan = new Set();
+
     this.lat = undefined;
     this.lon = undefined;
     this.mapMarker = undefined;
