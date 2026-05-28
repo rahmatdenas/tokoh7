@@ -1,102 +1,66 @@
 'use strict';
 
-// 1. UBAH JUDUL PETA
-const BASE_TITLE = 'Peta Persebaran Masjid – Sumatera Barat';
+const BASE_TITLE = 'Peta Persebaran Tokoh Indonesia Berdasarkan Tempat Kelahiran';
 
-// 2. ORGS: Kita akali menjadi singkatan nama daerah untuk label
-const ORGS = {
-  PDG: 'Kota Padang',
-  PRM: 'Kota Pariaman',
-  BKT: 'Kota Bukittinggi',
-  AGM: 'Kabupaten Agam',
-  // Tambahkan singkatan lain jika perlu
-}
-
-// 3. DESIGNATION_TYPES: Kita akali dengan ID Wikidata Kabupaten/Kota
-// Ini yang akan dibaca oleh Dropdown template Anda
-const DESIGNATION_TYPES = {
-  Q7253 : { org: 'PDG', name: 'Kota Padang'      , order: 1 },
-  Q7248 : { org: 'BKT', name: 'Kota Bukittinggi' , order: 2 },
-  Q7258 : { org: 'PRM', name: 'Kota Pariaman'    , order: 3 },
-  // Tambahkan ID Kab/Kota lain di sini dan pastikan urutannya (order) diteruskan
-}
-
-// 4. SPARQL_QUERY_0: Mengambil data lokasi dan LANGSUNG menarik Tahun Berdiri
-// 4. SPARQL_QUERY_0: Mengambil data masjid, filter wilayah, dan properti P131 langsung
-const SPARQL_QUERY_0 =
-`SELECT ?siteQid ?siteLabel ?designationQid ?p131Label ?tahunBerdiriMentah WHERE {
-  {
-    # 1. Definisikan wilayahnya dulu agar pencarian lebih terarah
-    VALUES ?designation { wd:Q7253 wd:Q7248 wd:Q7258 }
-    
-    # 2. Beri instruksi ke server untuk tidak mencari ke seluruh dunia (Optimasi Kecepatan)
-    hint:Query hint:optimizer "None" .
-    
-    ?site wdt:P131+ ?designation .
-    ?site wdt:P31 wd:Q32815 .
-  }
+// 1. KAMUS PENERJEMAH LOKAL
+const KAMUS_PEKERJAAN = {
+  'Q82955': 'Politikus', 'Q13141064': 'Pemain Bulu Tangkis', 
+  'Q177220': 'Penyanyi', 'Q937857': 'Pemain Sepak Bola', 
+  'Q4610556': 'Peragawan', 'Q1930187': 'Jurnalis', 
+  'Q3665646': 'Pemain Basket', 'Q193391': 'Diplomat', 
+  'Q189459': 'Ulama', 'Q1028181': 'Pelukis', 'Q39631': 'Dokter',
   
-  # Tetap menggunakan filter bahasa asli bawaan Anda
-  ?site rdfs:label ?siteLabel . FILTER(LANG(?siteLabel) = "id") .
+  // KELOMPOK PEGAWAI NEGERI
+  'Q212238': 'Pegawai Negeri', 'Q572700': 'Pegawai Negeri',
   
-  OPTIONAL {
-    ?site wdt:P131 ?p131Lokasi .
-    ?p131Lokasi rdfs:label ?p131Label .
-    FILTER(LANG(?p131Label) = "id") .
-  }
+  // KELOMPOK PEMERAN
+  'Q33999': 'Pemeran', 'Q10800557': 'Pemeran', 'Q10798782': 'Pemeran',
   
-  OPTIONAL { ?site wdt:P571 ?tahunBerdiriMentah . }
+  // KELOMPOK MILITER
+  'Q470647': 'Militer', 'Q189290': 'Militer',
   
-  BIND (SUBSTR(STR(?site), 32) AS ?siteQid) .
-  BIND (SUBSTR(STR(?designation), 32) AS ?designationQid) .
-} ORDER BY ?siteLabel`;
-
-// 5. SPARQL_QUERY_1: Tetap sama (Hanya mengambil koordinat P625)
-const SPARQL_QUERY_1 =
-`SELECT ?siteQid ?coord WHERE {
-  <SPARQLVALUESCLAUSE>
-  ?site p:P625 ?coordStatement .
-  ?coordStatement ps:P625 ?coord .
-  FILTER NOT EXISTS { ?coordStatement pq:P518 ?x }
-  BIND (SUBSTR(STR(?site), 32) AS ?siteQid) .
-}`;
-
-// (CATATAN: SPARQL_QUERY_2 SUDAH KITA HAPUS SEPENUHNYA AGAR SERVER TIDAK DOWN)
-
-// 6. SPARQL_QUERY_3: Tetap sama (Mengambil gambar dan link Wikipedia)
-const SPARQL_QUERY_3 =
-`SELECT ?siteQid ?image ?vicinityImage ?wikipediaUrlTitle WHERE {
-  <SPARQLVALUESCLAUSE>
+  // KELOMPOK PENULIS
+  'Q36180': 'Penulis', 'Q6625963': 'Penulis',
   
-  # 1. AMBIL GAMBAR UTAMA
-  OPTIONAL {
-    ?site p:P18 ?imageStatement .
-    ?imageStatement ps:P18 ?image .
-    FILTER NOT EXISTS { ?imageStatement pq:P3831 wd:Q16189205 }
-  }
+  // KELOMPOK PRAKTISI HUKUM
+  'Q40348': 'Praktisi Hukum', 'Q16533': 'Praktisi Hukum', 'Q600751': 'Praktisi Hukum',
   
-  # 2. AMBIL GAMBAR LINGKUNGAN SEKITAR
-  OPTIONAL {
-    ?site p:P18 ?vicinityStatement .
-    ?vicinityStatement ps:P18 ?vicinityImage .
-    FILTER EXISTS { ?vicinityStatement pq:P3831 wd:Q16189205 }
-  }
-
-  # 3. ARTIKEL WIKIPEDIA (Telah dikembalikan)
-  OPTIONAL {
-    ?wikipedia schema:about ?site ;
-               schema:isPartOf <https://id.wikipedia.org/> .
-    BIND (SUBSTR(STR(?wikipedia), 31) AS ?wikipediaUrlTitle) .
-  }
+  // KELOMPOK POLISI
+  'Q384593': 'Polisi', 'Q35535': 'Polisi',
   
-  BIND (SUBSTR(STR(?site), 32) AS ?siteQid) .
-}`;
+  // KELOMPOK PELAWAK
+  'Q245068': 'Pelawak', 'Q18545066': 'Pelawak',
+  
+  // KELOMPOK PELAKU USAHA
+  'Q43845': 'Pelaku Usaha', 'Q131524': 'Pelaku Usaha',  
+  
+  // KELOMPOK AKADEMISI / DOSEN
+  'Q1622272': 'Akademisi/Dosen', 'Q1650915': 'Akademisi/Dosen', 
+  'Q1569495': 'Akademisi/Dosen', 'Q462390': 'Akademisi/Dosen',
+  'Q121594': 'Akademisi/Dosen', 'Q3400985': 'Akademisi/Dosen', 'Q901': 'Akademisi/Dosen',  
+  
+  // KELOMPOK MUSISI
+  'Q753110': 'Musisi', 'Q639669': 'Musisi', 'Q36834': 'Musisi',  
+  
+  // KELOMPOK SINEAS
+  'Q2526255': 'Sineas', 'Q28389': 'Sineas', 'Q3282637': 'Sineas',
+  
+  // KELOMPOK ATLET LAINNYA
+  'Q2066131': 'Atlet Lainnya', 'Q11513337': 'Atlet Lainnya', 'Q11338576': 'Atlet Lainnya', 
+  'Q10833314': 'Atlet Lainnya', 'Q58825429': 'Atlet Lainnya', 'Q2309784': 'Atlet Lainnya'
+};
 
-// 7. ABOUT_SPARQL_QUERY: Disesuaikan menggunakan logika wilayah
-const ABOUT_SPARQL_QUERY =
-`
-`;
+// KAMUS PENERJEMAH GENDER
+const KAMUS_GENDER = {
+  'Q6581097': 'Laki-laki', 
+  'Q6581072': 'Perempuan'
+};
 
-// Globals
-var DesignationIndex;
-var Records = {}; // Memastikan Records dideklarasikan jika template membutuhkannya
+const ABOUT_SPARQL_QUERY = ``;
+
+// ==========================================
+// GLOBALS
+// ==========================================
+var BirthplaceIndex;
+var PekerjaanIndex;
+var PetaProvinsi = {};
